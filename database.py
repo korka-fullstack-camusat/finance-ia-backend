@@ -1,23 +1,47 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
+"""Base de données asynchrone — SQLAlchemy + asyncpg + NeonDB PostgreSQL."""
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.orm import declarative_base
 from app.config import settings
 
-# PostgreSQL : pas de check_same_thread, pool adapté à NeonDB (serverless)
-engine = create_engine(
-    settings.DATABASE_URL,
+# Convertir l'URL PostgreSQL en URL asyncpg
+# postgresql://... → postgresql+asyncpg://...
+def _make_async_url(url: str) -> str:
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    if url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql+asyncpg://", 1)
+    return url
+
+ASYNC_DATABASE_URL = _make_async_url(settings.DATABASE_URL)
+
+# Moteur asynchrone optimisé pour NeonDB (serverless pooler)
+engine = create_async_engine(
+    ASYNC_DATABASE_URL,
+    pool_size=10,
+    max_overflow=20,
     pool_pre_ping=True,       # vérifie la connexion avant utilisation
     pool_recycle=300,         # recycle les connexions toutes les 5 min
-    pool_size=5,
-    max_overflow=10,
+    echo=False,               # passer à True pour debug SQL
 )
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+AsyncSessionLocal = async_sessionmaker(
+    bind=engine,
+    class_=AsyncSession,
+    expire_on_commit=False,   # évite les lazy loads après commit
+    autocommit=False,
+    autoflush=False,
+)
+
 Base = declarative_base()
 
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+async def get_db() -> AsyncSession:
+    """Dépendance FastAPI : session DB asynchrone."""
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()

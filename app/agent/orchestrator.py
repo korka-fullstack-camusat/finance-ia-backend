@@ -1,11 +1,13 @@
-"""Orchestrateur principal de l'agent IA FinanceAI."""
+"""Orchestrateur principal — agent IA FinanceAI (100% async)."""
 import asyncio
+import json
 import time
 from datetime import datetime
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator
 
 import anthropic
-from sqlalchemy.orm import Session
+from sqlalchemy import select, desc
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models.task import Task, TaskResult, TaskStatus, TaskType
@@ -17,7 +19,6 @@ from app.agent.tasks.forecast import run_forecast
 from app.agent.tasks.anomaly import run_anomaly
 from app.agent.tasks.audit import run_audit
 
-# Map task types to their runner functions
 TASK_RUNNERS = {
     TaskType.REPORTING: run_reporting,
     TaskType.RECONCILIATION: run_reconciliation,
@@ -31,7 +32,6 @@ CHAT_SYSTEM_PROMPT = """Tu es FinanceAI, un assistant financier expert propulsé
 Tu aides les équipes financières à analyser leurs données, comprendre les résultats d'analyses,
 et prendre de meilleures décisions financières.
 
-Tu as accès au contexte des dernières analyses effectuées sur la plateforme.
 Réponds en français, de manière précise et professionnelle.
 Utilise des tableaux markdown quand c'est pertinent.
 
@@ -40,52 +40,54 @@ Contexte des dernières analyses :
 """
 
 
-def _get_anthropic_client() -> anthropic.AsyncAnthropic:
+def _get_client() -> anthropic.AsyncAnthropic:
     return anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
 
 
-def _load_file_data(db: Session) -> str:
-    """Charge les données du dernier fichier uploadé."""
-    import os
+async def _load_file_data(db: AsyncSession) -> str:
+    """Charge les données du dernier fichier uploadé (async)."""
+    import aiofiles
     import pandas as pd
 
-    file_record = (
-        db.query(UploadedFile).order_by(UploadedFile.created_at.desc()).first()
+    result = await db.execute(
+        select(UploadedFile).order_by(desc(UploadedFile.created_at)).limit(1)
     )
+    file_record = result.scalar_one_or_none()
+
     if not file_record:
-        return "Aucun fichier de données disponible. Veuillez uploader un fichier CSV ou XLSX."
+        return "Aucun fichier disponible. Uploadez un fichier CSV ou XLSX via le dashboard."
 
     try:
-        path = file_record.file_path
         if file_record.file_type == "csv":
-            df = pd.read_csv(path)
+            df = await asyncio.to_thread(pd.read_csv, file_record.file_path)
+            return df.to_string(max_rows=200)
         elif file_record.file_type in ("xlsx", "xls"):
-            df = pd.read_excel(path)
+            df = await asyncio.to_thread(pd.read_excel, file_record.file_path)
+            return df.to_string(max_rows=200)
         else:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                return f.read()[:8000]
-
-        return df.to_string(max_rows=200)
+            async with aiofiles.open(file_record.file_path, "r", errors="ignore") as f:
+                return (await f.read())[:8000]
     except Exception as e:
-        return f"Erreur lors de la lecture du fichier : {str(e)}"
+        return f"Erreur lecture fichier : {e}"
 
 
-async def execute_task(task: Task, db: Session, triggered_by: str = "auto") -> TaskResult:
-    """Exécute une tâche financière via l'agent IA."""
-    client = _get_anthropic_client()
-    data = _load_file_data(db)
+async def execute_task(
+    task: Task, db: AsyncSession, triggered_by: str = "auto"
+) -> TaskResult:
+    """Exécute une tâche financière via Claude (async)."""
+    client = _get_client()
+    data = await _load_file_data(db)
     date = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
 
     runner = TASK_RUNNERS.get(task.task_type)
     if not runner:
         raise ValueError(f"Type de tâche inconnu : {task.task_type}")
 
-    start = time.time()
+    start = time.perf_counter()
     try:
         content = await runner(data=data, date=date, anthropic_client=client)
-        duration = time.time() - start
+        duration = round(time.perf_counter() - start, 2)
 
-        # Résumé court (première ligne non vide)
         summary_lines = [l.strip() for l in content.split("\n") if l.strip()]
         summary = summary_lines[0][:200] if summary_lines else "Analyse complétée"
 
@@ -93,38 +95,37 @@ async def execute_task(task: Task, db: Session, triggered_by: str = "auto") -> T
             task_id=task.id,
             content=content,
             summary=summary,
-            duration=round(duration, 2),
+            duration=duration,
             triggered_by=triggered_by,
         )
         db.add(result)
-
         task.status = TaskStatus.SUCCESS
         task.last_run = datetime.utcnow()
-        db.commit()
-        db.refresh(result)
+        await db.commit()
+        await db.refresh(result)
         return result
-    except Exception as e:
+
+    except Exception:
         task.status = TaskStatus.ERROR
         task.last_run = datetime.utcnow()
-        db.commit()
+        await db.commit()
         raise
 
 
 async def stream_chat(
-    message: str,
-    db: Session,
+    message: str, db: AsyncSession
 ) -> AsyncGenerator[str, None]:
-    """Stream une réponse de chat via SSE."""
-    client = _get_anthropic_client()
+    """Stream la réponse du chat token par token (async SSE)."""
+    client = _get_client()
 
-    # Récupère le contexte des 3 dernières analyses
-    from app.models.task import TaskResult as TR
-    recent_results = (
-        db.query(TR).order_by(TR.created_at.desc()).limit(3).all()
+    result = await db.execute(
+        select(TaskResult).order_by(desc(TaskResult.created_at)).limit(3)
     )
-    context_parts = []
-    for r in recent_results:
-        context_parts.append(f"### Analyse du {r.created_at.strftime('%d/%m/%Y')}\n{r.summary}")
+    recent = result.scalars().all()
+    context_parts = [
+        f"### Analyse du {r.created_at.strftime('%d/%m/%Y')}\n{r.summary}"
+        for r in recent
+    ]
     context = "\n\n".join(context_parts) if context_parts else "Aucune analyse récente."
 
     system = CHAT_SYSTEM_PROMPT.format(context=context)
@@ -135,35 +136,41 @@ async def stream_chat(
         system=system,
         messages=[{"role": "user", "content": message}],
     ) as stream:
-        async for text in stream.text_stream:
-            yield text
+        async for token in stream.text_stream:
+            yield token
 
 
-async def stream_task_execution(task: Task, db: Session) -> AsyncGenerator[str, None]:
-    """Stream les logs d'exécution d'une tâche en temps réel."""
-    yield f"data: {{'type': 'log', 'message': 'Démarrage de la tâche : {task.name}'}}\n\n"
-    yield f"data: {{'type': 'log', 'message': 'Chargement des données financières...'}}\n\n"
+async def stream_task_execution(
+    task: Task, db: AsyncSession
+) -> AsyncGenerator[str, None]:
+    """Stream les logs d'exécution d'une tâche en temps réel (SSE)."""
 
-    client = _get_anthropic_client()
-    data = _load_file_data(db)
+    def _evt(payload: dict) -> str:
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    yield _evt({"type": "log", "message": f"Démarrage : {task.name}"})
+    yield _evt({"type": "log", "message": "Chargement des données financières..."})
+
+    client = _get_client()
+    data = await _load_file_data(db)
     date = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
 
-    yield f"data: {{'type': 'log', 'message': 'Données chargées. Analyse en cours avec Claude...'}}\n\n"
-    yield f"data: {{'type': 'progress', 'value': 30}}\n\n"
+    yield _evt({"type": "log", "message": "Données chargées. Analyse Claude en cours..."})
+    yield _evt({"type": "progress", "value": 30})
 
     runner = TASK_RUNNERS.get(task.task_type)
     if not runner:
-        yield f"data: {{'type': 'error', 'message': 'Type de tâche inconnu'}}\n\n"
+        yield _evt({"type": "error", "message": "Type de tâche inconnu"})
         return
 
-    start = time.time()
-    try:
-        task.status = TaskStatus.RUNNING
-        db.commit()
+    task.status = TaskStatus.RUNNING
+    await db.commit()
 
-        yield f"data: {{'type': 'progress', 'value': 60}}\n\n"
+    start = time.perf_counter()
+    try:
+        yield _evt({"type": "progress", "value": 60})
         content = await runner(data=data, date=date, anthropic_client=client)
-        duration = time.time() - start
+        duration = round(time.perf_counter() - start, 2)
 
         summary_lines = [l.strip() for l in content.split("\n") if l.strip()]
         summary = summary_lines[0][:200] if summary_lines else "Analyse complétée"
@@ -172,22 +179,22 @@ async def stream_task_execution(task: Task, db: Session) -> AsyncGenerator[str, 
             task_id=task.id,
             content=content,
             summary=summary,
-            duration=round(duration, 2),
+            duration=duration,
             triggered_by="manual",
         )
         db.add(result)
         task.status = TaskStatus.SUCCESS
         task.last_run = datetime.utcnow()
-        db.commit()
-        db.refresh(result)
+        await db.commit()
+        await db.refresh(result)
 
-        yield f"data: {{'type': 'progress', 'value': 100}}\n\n"
-        yield f"data: {{'type': 'log', 'message': 'Analyse terminée en {duration:.1f}s'}}\n\n"
-        import json
-        yield f"data: {{'type': 'result', 'result_id': '{result.id}', 'summary': {json.dumps(summary)}}}\n\n"
-        yield "data: {'type': 'done'}\n\n"
+        yield _evt({"type": "progress", "value": 100})
+        yield _evt({"type": "log", "message": f"Terminé en {duration}s"})
+        yield _evt({"type": "result", "result_id": result.id, "summary": summary})
+        yield _evt({"type": "done"})
+
     except Exception as e:
         task.status = TaskStatus.ERROR
         task.last_run = datetime.utcnow()
-        db.commit()
-        yield f"data: {{'type': 'error', 'message': '{str(e)[:200]}'}}\n\n"
+        await db.commit()
+        yield _evt({"type": "error", "message": str(e)[:300]})

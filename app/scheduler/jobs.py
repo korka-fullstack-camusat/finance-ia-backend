@@ -1,13 +1,12 @@
-"""APScheduler jobs pour l'exécution automatique des tâches financières."""
+"""APScheduler — exécution automatique des tâches financières (async)."""
 import asyncio
 import logging
 from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from sqlalchemy.orm import Session
 
-from database import SessionLocal
+from database import AsyncSessionLocal
 from app.models.task import Task, TaskType, TaskStatus, TaskFrequency
 from app.models.notification import Notification
 from app.agent.orchestrator import execute_task
@@ -15,72 +14,74 @@ from app.notifications.email import send_email_notification
 from app.notifications.slack import send_slack_notification
 
 logger = logging.getLogger(__name__)
-
 scheduler = AsyncIOScheduler()
 
 
-def _get_auto_tasks(db: Session, frequency: TaskFrequency):
-    return db.query(Task).filter(
-        Task.is_auto == True,
-        Task.frequency == frequency,
-        Task.status != TaskStatus.RUNNING,
-    ).all()
-
-
 async def _run_auto_tasks(frequency: TaskFrequency):
-    """Lance toutes les tâches AUTO pour une fréquence donnée."""
-    db = SessionLocal()
-    try:
-        tasks = _get_auto_tasks(db, frequency)
-        logger.info(f"[Scheduler] {len(tasks)} tâche(s) AUTO {frequency} à lancer")
+    """Lance toutes les tâches AUTO d'une fréquence donnée."""
+    from sqlalchemy import select
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Task).where(
+                Task.is_auto == True,
+                Task.frequency == frequency,
+                Task.status != TaskStatus.RUNNING,
+            )
+        )
+        tasks = result.scalars().all()
+        logger.info(f"[Scheduler] {len(tasks)} tâche(s) AUTO {frequency}")
 
         for task in tasks:
             try:
-                logger.info(f"[Scheduler] Exécution : {task.name}")
+                logger.info(f"[Scheduler] Lancement : {task.name}")
                 task.status = TaskStatus.RUNNING
-                db.commit()
+                await db.commit()
 
-                result = await execute_task(task, db, triggered_by="auto")
+                result_obj = await execute_task(task, db, triggered_by="auto")
 
-                # Notif en base
                 notif = Notification(
                     task_id=task.id,
                     task_name=task.name,
-                    message=f"Tâche '{task.name}' exécutée avec succès en {result.duration}s. {result.summary}",
+                    message=(
+                        f"✅ '{task.name}' exécutée en {result_obj.duration}s. "
+                        f"{result_obj.summary}"
+                    ),
                     channel="system",
                 )
                 db.add(notif)
-                db.commit()
+                await db.commit()
 
-                # Notif email + Slack
-                subject = f"[FinanceAI] {task.name} - Exécution automatique"
-                body = f"""
-Tâche : {task.name}
-Type : {task.task_type}
-Fréquence : {frequency}
-Durée : {result.duration}s
-Date : {datetime.utcnow().strftime('%d/%m/%Y %H:%M UTC')}
-
-Résumé :
-{result.summary}
-
-Consultez le dashboard pour le rapport complet.
-"""
-                await send_email_notification(subject=subject, body=body)
-                await send_slack_notification(task_name=task.name, summary=result.summary, duration=result.duration)
+                # Notifications email + Slack en parallèle
+                subject = f"[FinanceAI] {task.name} — Exécution automatique"
+                body = (
+                    f"Tâche : {task.name}\n"
+                    f"Fréquence : {frequency}\n"
+                    f"Durée : {result_obj.duration}s\n"
+                    f"Date : {datetime.utcnow().strftime('%d/%m/%Y %H:%M UTC')}\n\n"
+                    f"Résumé :\n{result_obj.summary}\n\n"
+                    f"Consultez le dashboard pour le rapport complet."
+                )
+                await asyncio.gather(
+                    send_email_notification(subject=subject, body=body),
+                    send_slack_notification(
+                        task_name=task.name,
+                        summary=result_obj.summary,
+                        duration=result_obj.duration,
+                    ),
+                    return_exceptions=True,
+                )
 
             except Exception as e:
-                logger.error(f"[Scheduler] Erreur tâche {task.name}: {e}")
+                logger.error(f"[Scheduler] Erreur {task.name} : {e}")
                 notif = Notification(
                     task_id=task.id,
                     task_name=task.name,
-                    message=f"Erreur lors de l'exécution de '{task.name}' : {str(e)[:200]}",
+                    message=f"❌ Erreur '{task.name}' : {str(e)[:200]}",
                     channel="system",
                 )
                 db.add(notif)
-                db.commit()
-    finally:
-        db.close()
+                await db.commit()
 
 
 async def run_daily_tasks():
@@ -95,87 +96,38 @@ async def run_monthly_tasks():
     await _run_auto_tasks(TaskFrequency.MONTHLY)
 
 
-def _seed_default_tasks(db: Session):
-    """Crée les 6 tâches par défaut si elles n'existent pas."""
-    default_tasks = [
-        {
-            "name": "Rapport Financier",
-            "description": "Génération automatique du bilan et du compte de résultat (P&L)",
-            "task_type": TaskType.REPORTING,
-            "frequency": TaskFrequency.MONTHLY,
-        },
-        {
-            "name": "Rapprochement Bancaire",
-            "description": "Rapprochement automatique des écritures comptables et bancaires",
-            "task_type": TaskType.RECONCILIATION,
-            "frequency": TaskFrequency.DAILY,
-        },
-        {
-            "name": "Calcul des KPIs",
-            "description": "Calcul DSO, DPO, liquidité, marges et indicateurs de performance",
-            "task_type": TaskType.KPI,
-            "frequency": TaskFrequency.WEEKLY,
-        },
-        {
-            "name": "Prévisions Trésorerie",
-            "description": "Prévisions de trésorerie sur 6 mois avec scénarios",
-            "task_type": TaskType.FORECAST,
-            "frequency": TaskFrequency.MONTHLY,
-        },
-        {
-            "name": "Détection d'Anomalies",
-            "description": "Détection de fraudes, doublons et transactions suspectes",
-            "task_type": TaskType.ANOMALY,
-            "frequency": TaskFrequency.DAILY,
-        },
-        {
-            "name": "Rapport d'Audit",
-            "description": "Rapport de conformité comptable, fiscale et réglementaire",
-            "task_type": TaskType.AUDIT,
-            "frequency": TaskFrequency.MONTHLY,
-        },
+async def _seed_default_tasks():
+    """Crée les 6 tâches par défaut si absentes."""
+    from sqlalchemy import select
+
+    defaults = [
+        ("Rapport Financier", "Bilan et P&L automatiques", TaskType.REPORTING, TaskFrequency.MONTHLY),
+        ("Rapprochement Bancaire", "Rapprochement écritures comptables/bancaires", TaskType.RECONCILIATION, TaskFrequency.DAILY),
+        ("Calcul des KPIs", "DSO, DPO, liquidité, marges", TaskType.KPI, TaskFrequency.WEEKLY),
+        ("Prévisions Trésorerie", "Prévisions 6 mois avec scénarios", TaskType.FORECAST, TaskFrequency.MONTHLY),
+        ("Détection d'Anomalies", "Fraudes, doublons, transactions suspectes", TaskType.ANOMALY, TaskFrequency.DAILY),
+        ("Rapport d'Audit", "Conformité comptable et réglementaire", TaskType.AUDIT, TaskFrequency.MONTHLY),
     ]
-    for t in default_tasks:
-        existing = db.query(Task).filter(Task.task_type == t["task_type"]).first()
-        if not existing:
-            task = Task(**t)
-            db.add(task)
-    db.commit()
+
+    async with AsyncSessionLocal() as db:
+        for name, desc, task_type, freq in defaults:
+            res = await db.execute(select(Task).where(Task.task_type == task_type))
+            if not res.scalar_one_or_none():
+                db.add(Task(name=name, description=desc, task_type=task_type, frequency=freq))
+        await db.commit()
+    logger.info("[Scheduler] Tâches par défaut initialisées")
 
 
-def start_scheduler(db: Session):
-    """Initialise et démarre le scheduler APScheduler."""
-    _seed_default_tasks(db)
-
-    # Quotidien : 06:00 chaque jour
-    scheduler.add_job(
-        run_daily_tasks,
-        CronTrigger(hour=6, minute=0),
-        id="daily_tasks",
-        replace_existing=True,
-    )
-
-    # Hebdomadaire : lundi 07:00
-    scheduler.add_job(
-        run_weekly_tasks,
-        CronTrigger(day_of_week="mon", hour=7, minute=0),
-        id="weekly_tasks",
-        replace_existing=True,
-    )
-
-    # Mensuel : 1er du mois 06:00
-    scheduler.add_job(
-        run_monthly_tasks,
-        CronTrigger(day=1, hour=6, minute=0),
-        id="monthly_tasks",
-        replace_existing=True,
-    )
-
+def start_scheduler():
+    """Démarre APScheduler avec les jobs quotidien/hebdo/mensuel."""
+    scheduler.add_job(run_daily_tasks, CronTrigger(hour=6, minute=0), id="daily", replace_existing=True)
+    scheduler.add_job(run_weekly_tasks, CronTrigger(day_of_week="mon", hour=7, minute=0), id="weekly", replace_existing=True)
+    scheduler.add_job(run_monthly_tasks, CronTrigger(day=1, hour=6, minute=0), id="monthly", replace_existing=True)
     scheduler.start()
-    logger.info("[Scheduler] APScheduler démarré (daily/weekly/monthly)")
+    logger.info("[Scheduler] Démarré (daily 06h / weekly lun 07h / monthly 1er 06h)")
 
 
 def stop_scheduler():
     if scheduler.running:
         scheduler.shutdown()
-        logger.info("[Scheduler] APScheduler arrêté")
+        logger.info("[Scheduler] Arrêté")

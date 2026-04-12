@@ -43,7 +43,12 @@ class Task(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    results = relationship("TaskResult", back_populates="task", cascade="all, delete-orphan")
+    results = relationship(
+        "TaskResult",
+        back_populates="task",
+        cascade="all, delete-orphan",
+        lazy="select",
+    )
 
 
 class TaskResult(Base):
@@ -54,7 +59,7 @@ class TaskResult(Base):
     content = Column(Text, nullable=False)
     summary = Column(Text, default="")
     duration = Column(Float, default=0.0)
-    triggered_by = Column(String, default="auto")  # auto | manual
+    triggered_by = Column(String, default="auto")
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    task = relationship("Task", back_populates="results")
+    task = relationship("Task", back_populates="results", lazy="select")

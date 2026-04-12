@@ -1,11 +1,14 @@
 from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker
 from app.config import settings
 
+# PostgreSQL : pas de check_same_thread, pool adapté à NeonDB (serverless)
 engine = create_engine(
     settings.DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {},
+    pool_pre_ping=True,       # vérifie la connexion avant utilisation
+    pool_recycle=300,         # recycle les connexions toutes les 5 min
+    pool_size=5,
+    max_overflow=10,
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -18,8 +21,3 @@ def get_db():
         yield db
     finally:
         db.close()
-
-
-def init_db():
-    from app.models import task, file, notification  # noqa: F401
-    Base.metadata.create_all(bind=engine)

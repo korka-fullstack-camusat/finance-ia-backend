@@ -4,11 +4,10 @@ import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
 from app.config import settings
-from database import init_db, SessionLocal
+from database import SessionLocal
 from app.scheduler.jobs import start_scheduler, stop_scheduler
 from app.api.routes import tasks, files, analysis, notifications, chat
 
@@ -21,9 +20,8 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
+    # Startup — les migrations sont gérées par Alembic (alembic upgrade head)
     logger.info("FinanceAI Backend démarrage...")
-    init_db()
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 
     db = SessionLocal()

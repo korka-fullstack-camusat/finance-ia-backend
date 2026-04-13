@@ -1,6 +1,12 @@
 """FinanceAI Backend — FastAPI + pg8000 + Python 3.14 compatible."""
 import logging
 import os
+from pathlib import Path
+
+# Charger .env AVANT tout import de app.config
+from dotenv import load_dotenv
+_env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=_env_path, override=True)
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

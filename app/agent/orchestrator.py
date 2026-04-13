@@ -197,7 +197,14 @@ async def stream_chat(
                     if delta:
                         asyncio.run_coroutine_threadsafe(queue.put(delta), loop)
         except Exception as e:
-            asyncio.run_coroutine_threadsafe(queue.put(f"[ERROR] {e}"), loop)
+            err_str = str(e)
+            if "401" in err_str or "Unauthorized" in err_str:
+                msg = "[ERROR] Clé API Mistral invalide ou expirée. Rendez-vous sur console.mistral.ai pour vérifier votre clé et vos crédits."
+            elif "429" in err_str:
+                msg = "[ERROR] Limite de requêtes Mistral atteinte. Réessayez dans quelques secondes."
+            else:
+                msg = f"[ERROR] {err_str}"
+            asyncio.run_coroutine_threadsafe(queue.put(msg), loop)
         finally:
             asyncio.run_coroutine_threadsafe(queue.put(None), loop)
 

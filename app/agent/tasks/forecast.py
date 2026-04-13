@@ -1,5 +1,5 @@
 """Forecast task: prévisions trésorerie 6 mois."""
-from mistralai import Mistral
+from groq import Groq
 
 FORECAST_PROMPT = """Tu es un expert en prévision financière et gestion de trésorerie.
 Établis des prévisions de trésorerie sur les 6 prochains mois à partir des données historiques.
@@ -23,9 +23,9 @@ Date d'analyse : {date}
 """
 
 
-def run_forecast(data: str, date: str, client: Mistral, model: str) -> str:
+def run_forecast(data: str, date: str, client: Groq, model: str) -> str:
     prompt = FORECAST_PROMPT.format(data=data[:8000], date=date)
-    response = client.chat.complete(
+    response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
     )

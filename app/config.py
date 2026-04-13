@@ -2,7 +2,7 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
 
-_BASE_DIR = Path(__file__).resolve().parent.parent  # racine du backend
+_BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 class Settings(BaseSettings):
@@ -12,8 +12,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    MISTRAL_API_KEY: str = ""
-    MISTRAL_MODEL: str = "mistral-small-latest"
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
     DATABASE_URL: str = "sqlite:///./financeai.db"
     REDIS_URL: str = "redis://localhost:6379"
     SENDGRID_API_KEY: str = ""

@@ -1,5 +1,5 @@
 """KPI task: calcul DSO, DPO, liquidité, marges."""
-from mistralai import Mistral
+from groq import Groq
 
 KPI_PROMPT = """Tu es un analyste financier spécialisé en indicateurs de performance.
 Calcule et analyse les KPIs financiers suivants à partir des données fournies :
@@ -21,9 +21,9 @@ Date : {date}
 """
 
 
-def run_kpi(data: str, date: str, client: Mistral, model: str) -> str:
+def run_kpi(data: str, date: str, client: Groq, model: str) -> str:
     prompt = KPI_PROMPT.format(data=data[:8000], date=date)
-    response = client.chat.complete(
+    response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
     )

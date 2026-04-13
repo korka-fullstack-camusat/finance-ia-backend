@@ -1,5 +1,5 @@
 """Reporting task: génère bilan et P&L."""
-from mistralai import Mistral
+from groq import Groq
 
 REPORTING_PROMPT = """Tu es un expert-comptable et analyste financier senior.
 Analyse les données financières fournies et génère un rapport complet comprenant :
@@ -18,9 +18,9 @@ Date d'analyse : {date}
 """
 
 
-def run_reporting(data: str, date: str, client: Mistral, model: str) -> str:
+def run_reporting(data: str, date: str, client: Groq, model: str) -> str:
     prompt = REPORTING_PROMPT.format(data=data[:8000], date=date)
-    response = client.chat.complete(
+    response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
     )

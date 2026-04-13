@@ -1,4 +1,4 @@
-"""Orchestrateur agent IA — Mistral AI + pg8000 sync + async streaming."""
+"""Orchestrateur agent IA — Groq + pg8000 sync + async streaming."""
 import asyncio
 import json
 import threading
@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 from typing import AsyncGenerator
 
-from mistralai import Mistral
+from groq import Groq
 from sqlalchemy import select, desc
 from sqlalchemy.orm import Session
 
@@ -29,7 +29,7 @@ TASK_RUNNERS = {
     TaskType.AUDIT: run_audit,
 }
 
-CHAT_SYSTEM_PROMPT = """Tu es FinanceAI, un assistant financier expert propulsé par Mistral AI.
+CHAT_SYSTEM_PROMPT = """Tu es FinanceAI, un assistant financier expert propulsé par Groq + Llama.
 Tu aides les équipes financières à analyser leurs données et prendre de meilleures décisions.
 
 Réponds en français, de manière précise et professionnelle.
@@ -40,8 +40,8 @@ Contexte des dernières analyses :
 """
 
 
-def _get_client() -> Mistral:
-    return Mistral(api_key=settings.MISTRAL_API_KEY)
+def _get_client() -> Groq:
+    return Groq(api_key=settings.GROQ_API_KEY)
 
 
 def _load_file_data_sync(db: Session) -> str:
@@ -70,56 +70,6 @@ def _load_file_data_sync(db: Session) -> str:
 
 async def _load_file_data(db: Session) -> str:
     return await asyncio.to_thread(_load_file_data_sync, db)
-
-
-def _save_result_sync(
-    db: Session, task: Task, content: str, duration: float, triggered_by: str
-) -> TaskResult:
-    summary_lines = [l.strip() for l in content.split("\n") if l.strip()]
-    summary = summary_lines[0][:200] if summary_lines else "Analyse complétée"
-
-    result = TaskResult(
-        task_id=task.id,
-        content=content,
-        summary=summary,
-        duration=round(duration, 2),
-        triggered_by=triggered_by,
-    )
-    db.add(result)
-    task.status = TaskStatus.SUCCESS
-    task.last_run = datetime.utcnow()
-    db.commit()
-    db.refresh(result)
-    return result
-
-
-async def execute_task(
-    task: Task, db: Session, triggered_by: str = "auto"
-) -> TaskResult:
-    """Exécute une tâche financière via Mistral."""
-    client = _get_client()
-    data = await _load_file_data(db)
-    date = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
-
-    runner = TASK_RUNNERS.get(task.task_type)
-    if not runner:
-        raise ValueError(f"Type de tâche inconnu : {task.task_type}")
-
-    start = time.perf_counter()
-    try:
-        content = await asyncio.to_thread(
-            runner, data, date, client, settings.MISTRAL_MODEL
-        )
-        duration = time.perf_counter() - start
-        result = await asyncio.to_thread(
-            _save_result_sync, db, task, content, duration, triggered_by
-        )
-        return result
-    except Exception:
-        task.status = TaskStatus.ERROR
-        task.last_run = datetime.utcnow()
-        await asyncio.to_thread(db.commit)
-        raise
 
 
 def _load_specific_files_sync(db: Session, file_ids: list) -> str:
@@ -154,13 +104,62 @@ def _load_specific_files_sync(db: Session, file_ids: list) -> str:
     return "\n\n".join(parts)
 
 
+def _save_result_sync(
+    db: Session, task: Task, content: str, duration: float, triggered_by: str
+) -> TaskResult:
+    summary_lines = [l.strip() for l in content.split("\n") if l.strip()]
+    summary = summary_lines[0][:200] if summary_lines else "Analyse complétée"
+
+    result = TaskResult(
+        task_id=task.id,
+        content=content,
+        summary=summary,
+        duration=round(duration, 2),
+        triggered_by=triggered_by,
+    )
+    db.add(result)
+    task.status = TaskStatus.SUCCESS
+    task.last_run = datetime.utcnow()
+    db.commit()
+    db.refresh(result)
+    return result
+
+
+async def execute_task(
+    task: Task, db: Session, triggered_by: str = "auto"
+) -> TaskResult:
+    """Exécute une tâche financière via Groq."""
+    client = _get_client()
+    data = await _load_file_data(db)
+    date = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
+
+    runner = TASK_RUNNERS.get(task.task_type)
+    if not runner:
+        raise ValueError(f"Type de tâche inconnu : {task.task_type}")
+
+    start = time.perf_counter()
+    try:
+        content = await asyncio.to_thread(
+            runner, data, date, client, settings.GROQ_MODEL
+        )
+        duration = time.perf_counter() - start
+        result = await asyncio.to_thread(
+            _save_result_sync, db, task, content, duration, triggered_by
+        )
+        return result
+    except Exception:
+        task.status = TaskStatus.ERROR
+        task.last_run = datetime.utcnow()
+        await asyncio.to_thread(db.commit)
+        raise
+
+
 async def stream_chat(
     message: str, db: Session, file_ids: list = []
 ) -> AsyncGenerator[str, None]:
-    """Stream le chat Mistral token par token via thread + asyncio.Queue."""
+    """Stream le chat Groq token par token via thread + asyncio.Queue."""
     client = _get_client()
 
-    # Contexte des dernières analyses
     def _get_context():
         recent = db.execute(
             select(TaskResult).order_by(desc(TaskResult.created_at)).limit(3)
@@ -170,12 +169,12 @@ async def stream_chat(
 
     context = await asyncio.to_thread(_get_context)
 
-    # Données des fichiers joints
     file_data = ""
     if file_ids:
         file_data = await asyncio.to_thread(_load_specific_files_sync, db, file_ids)
         if file_data:
             file_data = f"\n\n--- FICHIERS JOINTS ---\n{file_data}\n--- FIN FICHIERS ---"
+
     system = CHAT_SYSTEM_PROMPT.format(context=context)
     user_content = message + file_data
 
@@ -183,25 +182,26 @@ async def stream_chat(
     loop = asyncio.get_event_loop()
 
     def _do_stream():
-        """Streaming Mistral dans un thread dédié."""
+        """Streaming Groq dans un thread dédié."""
         try:
-            with client.chat.stream(
-                model=settings.MISTRAL_MODEL,
+            stream = client.chat.completions.create(
+                model=settings.GROQ_MODEL,
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": user_content},
                 ],
-            ) as stream:
-                for chunk in stream:
-                    delta = chunk.data.choices[0].delta.content
-                    if delta:
-                        asyncio.run_coroutine_threadsafe(queue.put(delta), loop)
+                stream=True,
+            )
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    asyncio.run_coroutine_threadsafe(queue.put(delta), loop)
         except Exception as e:
             err_str = str(e)
-            if "401" in err_str or "Unauthorized" in err_str:
-                msg = "[ERROR] Clé API Mistral invalide ou expirée. Rendez-vous sur console.mistral.ai pour vérifier votre clé et vos crédits."
+            if "401" in err_str or "unauthorized" in err_str.lower():
+                msg = "[ERROR] Clé API Groq invalide. Vérifiez GROQ_API_KEY dans votre .env"
             elif "429" in err_str:
-                msg = "[ERROR] Limite de requêtes Mistral atteinte. Réessayez dans quelques secondes."
+                msg = "[ERROR] Limite de requêtes Groq atteinte. Réessayez dans quelques secondes."
             else:
                 msg = f"[ERROR] {err_str}"
             asyncio.run_coroutine_threadsafe(queue.put(msg), loop)
@@ -233,7 +233,7 @@ async def stream_task_execution(
     data = await _load_file_data(db)
     date = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
 
-    yield _evt({"type": "log", "message": "Données chargées. Analyse Mistral en cours..."})
+    yield _evt({"type": "log", "message": "Données chargées. Analyse IA en cours..."})
     yield _evt({"type": "progress", "value": 30})
 
     runner = TASK_RUNNERS.get(task.task_type)
@@ -251,7 +251,7 @@ async def stream_task_execution(
     try:
         yield _evt({"type": "progress", "value": 60})
         content = await asyncio.to_thread(
-            runner, data, date, client, settings.MISTRAL_MODEL
+            runner, data, date, client, settings.GROQ_MODEL
         )
         duration = time.perf_counter() - start
         result = await asyncio.to_thread(

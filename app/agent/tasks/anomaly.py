@@ -1,5 +1,5 @@
 """Anomaly task: détection fraudes et doublons."""
-from mistralai import Mistral
+from groq import Groq
 
 ANOMALY_PROMPT = """Tu es un expert en détection de fraudes et d'anomalies financières.
 Analyse les données financières pour identifier toute irrégularité :
@@ -22,9 +22,9 @@ Date d'analyse : {date}
 """
 
 
-def run_anomaly(data: str, date: str, client: Mistral, model: str) -> str:
+def run_anomaly(data: str, date: str, client: Groq, model: str) -> str:
     prompt = ANOMALY_PROMPT.format(data=data[:8000], date=date)
-    response = client.chat.complete(
+    response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
     )

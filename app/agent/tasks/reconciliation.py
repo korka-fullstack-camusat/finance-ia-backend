@@ -1,5 +1,5 @@
 """Reconciliation task: rapprochement bancaire."""
-from mistralai import Mistral
+from groq import Groq
 
 RECONCILIATION_PROMPT = """Tu es un expert en rapprochement bancaire.
 Analyse les données fournies et effectue le rapprochement bancaire complet :
@@ -19,9 +19,9 @@ Date : {date}
 """
 
 
-def run_reconciliation(data: str, date: str, client: Mistral, model: str) -> str:
+def run_reconciliation(data: str, date: str, client: Groq, model: str) -> str:
     prompt = RECONCILIATION_PROMPT.format(data=data[:8000], date=date)
-    response = client.chat.complete(
+    response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
     )

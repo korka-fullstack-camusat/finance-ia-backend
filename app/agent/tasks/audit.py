@@ -1,5 +1,5 @@
 """Audit task: rapport de conformité."""
-from mistralai import Mistral
+from groq import Groq
 
 AUDIT_PROMPT = """Tu es un auditeur financier certifié expert en conformité réglementaire.
 Génère un rapport d'audit de conformité complet :
@@ -22,9 +22,9 @@ Date d'audit : {date}
 """
 
 
-def run_audit(data: str, date: str, client: Mistral, model: str) -> str:
+def run_audit(data: str, date: str, client: Groq, model: str) -> str:
     prompt = AUDIT_PROMPT.format(data=data[:8000], date=date)
-    response = client.chat.complete(
+    response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
     )

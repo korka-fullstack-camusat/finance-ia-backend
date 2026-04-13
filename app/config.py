@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     )
 
     MISTRAL_API_KEY: str = ""
-    MISTRAL_MODEL: str = "mistral-large-latest"
+    MISTRAL_MODEL: str = "mistral-small-latest"
     DATABASE_URL: str = "sqlite:///./financeai.db"
     REDIS_URL: str = "redis://localhost:6379"
     SENDGRID_API_KEY: str = ""

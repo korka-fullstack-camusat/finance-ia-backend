@@ -1,4 +1,4 @@
-"""FinanceAI Backend — FastAPI 100% asynchrone."""
+"""FinanceAI Backend — FastAPI + pg8000 + Python 3.14 compatible."""
 import logging
 import os
 
@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.config import settings
-from app.scheduler.jobs import start_scheduler, stop_scheduler, _seed_default_tasks
+from app.scheduler.jobs import start_scheduler, stop_scheduler
 from app.api.routes import tasks, files, analysis, notifications, chat
 
 logging.basicConfig(
@@ -21,24 +21,17 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("FinanceAI Backend démarrage...")
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
-
-    # Seed les 6 tâches par défaut (async)
-    await _seed_default_tasks()
-
-    # Démarre le scheduler async
-    start_scheduler()
-
+    start_scheduler()  # seed tâches + démarre APScheduler
     logger.info("FinanceAI Backend prêt ✅")
     yield
-
     stop_scheduler()
     logger.info("FinanceAI Backend arrêté.")
 
 
 app = FastAPI(
     title="FinanceAI API",
-    description="Backend IA asynchrone pour la gestion financière automatisée",
-    version="2.0.0",
+    description="Backend IA pour la gestion financière — Python 3.14 + pg8000",
+    version="2.1.0",
     lifespan=lifespan,
 )
 
@@ -58,16 +51,16 @@ app.include_router(chat.router)
 
 
 @app.get("/api/health")
-async def health_check():
-    return {"status": "ok", "service": "FinanceAI Backend", "version": "2.0.0", "mode": "async"}
+def health_check():
+    return {
+        "status": "ok",
+        "service": "FinanceAI Backend",
+        "version": "2.1.0",
+        "python_compat": "3.14+",
+        "db_driver": "pg8000 (pure Python)",
+    }
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        workers=1,  # 1 worker pour APScheduler (pas de multi-process)
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, workers=1)

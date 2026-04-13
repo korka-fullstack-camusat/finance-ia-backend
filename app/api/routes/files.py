@@ -1,4 +1,4 @@
-"""Routes fichiers — 100% async."""
+"""Routes fichiers — sync + upload async (aiofiles)."""
 import os
 import uuid
 from typing import List
@@ -7,7 +7,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 import aiofiles
 
 from database import get_db
@@ -33,25 +33,18 @@ class FileOut(BaseModel):
 
 
 @router.post("/upload", response_model=FileOut)
-async def upload_file(
-    file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db),
-):
+async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
     if not file.filename:
         raise HTTPException(status_code=400, detail="Nom de fichier manquant")
 
     ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
     if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Format non supporté. Acceptés : {', '.join(ALLOWED_EXTENSIONS)}",
-        )
+        raise HTTPException(status_code=400, detail=f"Format non supporté. Acceptés : {', '.join(ALLOWED_EXTENSIONS)}")
 
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
     unique_name = f"{uuid.uuid4()}.{ext}"
     file_path = os.path.join(settings.UPLOAD_DIR, unique_name)
 
-    # Lecture et écriture asynchrones
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=413, detail="Fichier trop volumineux (max 50MB)")
@@ -67,32 +60,26 @@ async def upload_file(
         file_path=file_path,
     )
     db.add(record)
-    await db.commit()
-    await db.refresh(record)
+    db.commit()
+    db.refresh(record)
     return record
 
 
 @router.get("", response_model=List[FileOut])
-async def list_files(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(UploadedFile).order_by(UploadedFile.created_at.desc())
-    )
-    return result.scalars().all()
+def list_files(db: Session = Depends(get_db)):
+    return db.execute(select(UploadedFile).order_by(UploadedFile.created_at.desc())).scalars().all()
 
 
 @router.delete("/{file_id}")
-async def delete_file(file_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(UploadedFile).where(UploadedFile.id == file_id))
-    record = result.scalar_one_or_none()
+def delete_file(file_id: str, db: Session = Depends(get_db)):
+    record = db.execute(select(UploadedFile).where(UploadedFile.id == file_id)).scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="Fichier introuvable")
-
     try:
         if os.path.exists(record.file_path):
             os.remove(record.file_path)
     except OSError:
         pass
-
-    await db.delete(record)
-    await db.commit()
+    db.delete(record)
+    db.commit()
     return {"message": "Fichier supprimé"}

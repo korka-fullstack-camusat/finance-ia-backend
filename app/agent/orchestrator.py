@@ -122,8 +122,40 @@ async def execute_task(
         raise
 
 
+def _load_specific_files_sync(db: Session, file_ids: list) -> str:
+    """Charge les fichiers demandés (sync)."""
+    import pandas as pd
+
+    if not file_ids:
+        return ""
+
+    records = db.execute(
+        select(UploadedFile).where(UploadedFile.id.in_(file_ids))
+    ).scalars().all()
+
+    if not records:
+        return ""
+
+    parts = []
+    for rec in records:
+        try:
+            if rec.file_type == "csv":
+                df = pd.read_csv(rec.file_path)
+            elif rec.file_type in ("xlsx", "xls"):
+                df = pd.read_excel(rec.file_path)
+            else:
+                with open(rec.file_path, "r", errors="ignore") as f:
+                    parts.append(f"### {rec.original_name}\n{f.read()[:4000]}")
+                continue
+            parts.append(f"### {rec.original_name}\n{df.to_string(max_rows=100)}")
+        except Exception as e:
+            parts.append(f"### {rec.original_name}\nErreur lecture: {e}")
+
+    return "\n\n".join(parts)
+
+
 async def stream_chat(
-    message: str, db: Session
+    message: str, db: Session, file_ids: list = []
 ) -> AsyncGenerator[str, None]:
     """Stream le chat Mistral token par token via thread + asyncio.Queue."""
     client = _get_client()
@@ -137,7 +169,15 @@ async def stream_chat(
         return "\n\n".join(parts) if parts else "Aucune analyse récente."
 
     context = await asyncio.to_thread(_get_context)
+
+    # Données des fichiers joints
+    file_data = ""
+    if file_ids:
+        file_data = await asyncio.to_thread(_load_specific_files_sync, db, file_ids)
+        if file_data:
+            file_data = f"\n\n--- FICHIERS JOINTS ---\n{file_data}\n--- FIN FICHIERS ---"
     system = CHAT_SYSTEM_PROMPT.format(context=context)
+    user_content = message + file_data
 
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_event_loop()
@@ -149,7 +189,7 @@ async def stream_chat(
                 model=settings.MISTRAL_MODEL,
                 messages=[
                     {"role": "system", "content": system},
-                    {"role": "user", "content": message},
+                    {"role": "user", "content": user_content},
                 ],
             ) as stream:
                 for chunk in stream:

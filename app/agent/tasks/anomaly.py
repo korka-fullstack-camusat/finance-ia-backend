@@ -1,4 +1,5 @@
 """Anomaly task: détection fraudes et doublons."""
+from mistralai import Mistral
 
 ANOMALY_PROMPT = """Tu es un expert en détection de fraudes et d'anomalies financières.
 Analyse les données financières pour identifier toute irrégularité :
@@ -21,11 +22,10 @@ Date d'analyse : {date}
 """
 
 
-async def run_anomaly(data: str, date: str, anthropic_client) -> str:
+def run_anomaly(data: str, date: str, client: Mistral, model: str) -> str:
     prompt = ANOMALY_PROMPT.format(data=data[:8000], date=date)
-    message = await anthropic_client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=4096,
+    response = client.chat.complete(
+        model=model,
         messages=[{"role": "user", "content": prompt}],
     )
-    return message.content[0].text
+    return response.choices[0].message.content

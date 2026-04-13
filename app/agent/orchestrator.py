@@ -1,11 +1,12 @@
-"""Orchestrateur agent IA — Claude Anthropic + pg8000 sync DB + async streaming."""
+"""Orchestrateur agent IA — Mistral AI + pg8000 sync + async streaming."""
 import asyncio
 import json
+import threading
 import time
 from datetime import datetime
 from typing import AsyncGenerator
 
-import anthropic
+from mistralai import Mistral
 from sqlalchemy import select, desc
 from sqlalchemy.orm import Session
 
@@ -28,7 +29,7 @@ TASK_RUNNERS = {
     TaskType.AUDIT: run_audit,
 }
 
-CHAT_SYSTEM_PROMPT = """Tu es FinanceAI, un assistant financier expert propulsé par Claude.
+CHAT_SYSTEM_PROMPT = """Tu es FinanceAI, un assistant financier expert propulsé par Mistral AI.
 Tu aides les équipes financières à analyser leurs données et prendre de meilleures décisions.
 
 Réponds en français, de manière précise et professionnelle.
@@ -39,12 +40,12 @@ Contexte des dernières analyses :
 """
 
 
-def _get_client() -> anthropic.AsyncAnthropic:
-    return anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+def _get_client() -> Mistral:
+    return Mistral(api_key=settings.MISTRAL_API_KEY)
 
 
 def _load_file_data_sync(db: Session) -> str:
-    """Charge les données du dernier fichier uploadé (sync)."""
+    """Charge le dernier fichier uploadé (sync)."""
     import pandas as pd
 
     file_record = db.execute(
@@ -68,12 +69,12 @@ def _load_file_data_sync(db: Session) -> str:
 
 
 async def _load_file_data(db: Session) -> str:
-    """Version async : délègue à un thread pour ne pas bloquer l'event loop."""
     return await asyncio.to_thread(_load_file_data_sync, db)
 
 
-def _save_result_sync(db: Session, task: Task, content: str, duration: float, triggered_by: str) -> TaskResult:
-    """Sauvegarde le résultat en DB (sync)."""
+def _save_result_sync(
+    db: Session, task: Task, content: str, duration: float, triggered_by: str
+) -> TaskResult:
     summary_lines = [l.strip() for l in content.split("\n") if l.strip()]
     summary = summary_lines[0][:200] if summary_lines else "Analyse complétée"
 
@@ -92,8 +93,10 @@ def _save_result_sync(db: Session, task: Task, content: str, duration: float, tr
     return result
 
 
-async def execute_task(task: Task, db: Session, triggered_by: str = "auto") -> TaskResult:
-    """Exécute une tâche financière via Claude."""
+async def execute_task(
+    task: Task, db: Session, triggered_by: str = "auto"
+) -> TaskResult:
+    """Exécute une tâche financière via Mistral."""
     client = _get_client()
     data = await _load_file_data(db)
     date = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
@@ -104,9 +107,13 @@ async def execute_task(task: Task, db: Session, triggered_by: str = "auto") -> T
 
     start = time.perf_counter()
     try:
-        content = await runner(data=data, date=date, anthropic_client=client)
+        content = await asyncio.to_thread(
+            runner, data, date, client, settings.MISTRAL_MODEL
+        )
         duration = time.perf_counter() - start
-        result = await asyncio.to_thread(_save_result_sync, db, task, content, duration, triggered_by)
+        result = await asyncio.to_thread(
+            _save_result_sync, db, task, content, duration, triggered_by
+        )
         return result
     except Exception:
         task.status = TaskStatus.ERROR
@@ -115,11 +122,13 @@ async def execute_task(task: Task, db: Session, triggered_by: str = "auto") -> T
         raise
 
 
-async def stream_chat(message: str, db: Session) -> AsyncGenerator[str, None]:
-    """Stream la réponse chat token par token."""
+async def stream_chat(
+    message: str, db: Session
+) -> AsyncGenerator[str, None]:
+    """Stream le chat Mistral token par token via thread + asyncio.Queue."""
     client = _get_client()
 
-    # Charge le contexte des dernières analyses (sync dans thread)
+    # Contexte des dernières analyses
     def _get_context():
         recent = db.execute(
             select(TaskResult).order_by(desc(TaskResult.created_at)).limit(3)
@@ -130,17 +139,41 @@ async def stream_chat(message: str, db: Session) -> AsyncGenerator[str, None]:
     context = await asyncio.to_thread(_get_context)
     system = CHAT_SYSTEM_PROMPT.format(context=context)
 
-    async with client.messages.stream(
-        model="claude-sonnet-4-20250514",
-        max_tokens=2048,
-        system=system,
-        messages=[{"role": "user", "content": message}],
-    ) as stream:
-        async for token in stream.text_stream:
-            yield token
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_event_loop()
+
+    def _do_stream():
+        """Streaming Mistral dans un thread dédié."""
+        try:
+            with client.chat.stream(
+                model=settings.MISTRAL_MODEL,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": message},
+                ],
+            ) as stream:
+                for chunk in stream:
+                    delta = chunk.data.choices[0].delta.content
+                    if delta:
+                        asyncio.run_coroutine_threadsafe(queue.put(delta), loop)
+        except Exception as e:
+            asyncio.run_coroutine_threadsafe(queue.put(f"[ERROR] {e}"), loop)
+        finally:
+            asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+
+    thread = threading.Thread(target=_do_stream, daemon=True)
+    thread.start()
+
+    while True:
+        token = await queue.get()
+        if token is None:
+            break
+        yield token
 
 
-async def stream_task_execution(task: Task, db: Session) -> AsyncGenerator[str, None]:
+async def stream_task_execution(
+    task: Task, db: Session
+) -> AsyncGenerator[str, None]:
     """Stream les logs d'exécution via SSE."""
 
     def _evt(payload: dict) -> str:
@@ -153,7 +186,7 @@ async def stream_task_execution(task: Task, db: Session) -> AsyncGenerator[str, 
     data = await _load_file_data(db)
     date = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
 
-    yield _evt({"type": "log", "message": "Données chargées. Analyse Claude en cours..."})
+    yield _evt({"type": "log", "message": "Données chargées. Analyse Mistral en cours..."})
     yield _evt({"type": "progress", "value": 30})
 
     runner = TASK_RUNNERS.get(task.task_type)
@@ -170,9 +203,10 @@ async def stream_task_execution(task: Task, db: Session) -> AsyncGenerator[str, 
     start = time.perf_counter()
     try:
         yield _evt({"type": "progress", "value": 60})
-        content = await runner(data=data, date=date, anthropic_client=client)
+        content = await asyncio.to_thread(
+            runner, data, date, client, settings.MISTRAL_MODEL
+        )
         duration = time.perf_counter() - start
-
         result = await asyncio.to_thread(
             _save_result_sync, db, task, content, duration, "manual"
         )

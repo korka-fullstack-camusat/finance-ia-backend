@@ -3,7 +3,8 @@ from typing import List
 
 
 class Settings(BaseSettings):
-    ANTHROPIC_API_KEY: str = ""
+    MISTRAL_API_KEY: str = ""
+    MISTRAL_MODEL: str = "mistral-large-latest"
     DATABASE_URL: str = "sqlite:///./financeai.db"
     REDIS_URL: str = "redis://localhost:6379"
     SENDGRID_API_KEY: str = ""

@@ -1,7 +1,5 @@
-"""Reporting task: génère bilan et P&L à partir des données financières."""
-import json
-from typing import Optional
-
+"""Reporting task: génère bilan et P&L."""
+from mistralai import Mistral
 
 REPORTING_PROMPT = """Tu es un expert-comptable et analyste financier senior.
 Analyse les données financières fournies et génère un rapport complet comprenant :
@@ -20,13 +18,10 @@ Date d'analyse : {date}
 """
 
 
-async def run_reporting(data: str, date: str, anthropic_client) -> str:
-    """Lance l'analyse de reporting avec Claude."""
+def run_reporting(data: str, date: str, client: Mistral, model: str) -> str:
     prompt = REPORTING_PROMPT.format(data=data[:8000], date=date)
-
-    message = await anthropic_client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=4096,
+    response = client.chat.complete(
+        model=model,
         messages=[{"role": "user", "content": prompt}],
     )
-    return message.content[0].text
+    return response.choices[0].message.content

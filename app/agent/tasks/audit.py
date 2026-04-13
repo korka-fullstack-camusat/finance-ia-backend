@@ -1,4 +1,5 @@
 """Audit task: rapport de conformité."""
+from mistralai import Mistral
 
 AUDIT_PROMPT = """Tu es un auditeur financier certifié expert en conformité réglementaire.
 Génère un rapport d'audit de conformité complet :
@@ -21,11 +22,10 @@ Date d'audit : {date}
 """
 
 
-async def run_audit(data: str, date: str, anthropic_client) -> str:
+def run_audit(data: str, date: str, client: Mistral, model: str) -> str:
     prompt = AUDIT_PROMPT.format(data=data[:8000], date=date)
-    message = await anthropic_client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=4096,
+    response = client.chat.complete(
+        model=model,
         messages=[{"role": "user", "content": prompt}],
     )
-    return message.content[0].text
+    return response.choices[0].message.content

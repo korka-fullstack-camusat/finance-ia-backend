@@ -21,6 +21,12 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("FinanceAI Backend démarrage...")
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+    # Vérification clé Mistral
+    key = settings.MISTRAL_API_KEY
+    if key:
+        logger.info(f"Mistral API key chargée : {key[:6]}...{key[-4:]}")
+    else:
+        logger.warning("⚠️  MISTRAL_API_KEY non définie — vérifiez votre .env")
     start_scheduler()  # seed tâches + démarre APScheduler
     logger.info("FinanceAI Backend prêt ✅")
     yield
